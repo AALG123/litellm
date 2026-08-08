@@ -4790,7 +4790,9 @@ if MCP_AVAILABLE:
 
         return stored
 
-    async def _refresh_request_otel_destinations(user_api_key_auth: Any) -> None:
+    async def _refresh_request_otel_destinations(
+        user_api_key_auth: object,
+    ) -> None:
         """Re-resolve the caller's admin destinations for THIS JSON-RPC message.
 
         A stateful MCP session dispatches every later message on descendants of the task
