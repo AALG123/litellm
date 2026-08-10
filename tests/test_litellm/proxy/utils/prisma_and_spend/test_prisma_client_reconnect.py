@@ -97,6 +97,53 @@ async def test_run_reconnect_cycle_direct_path_recreates_when_probe_fails(
 
 
 @pytest.mark.asyncio
+async def test_run_reconnect_cycle_force_recreate_skips_probe_and_recreates(
+    prisma_client: PrismaClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A healthy writer must not veto the recreate when the caller already
+    knows the session state is poisoned (stale prepared statements after a
+    schema change). Regression for
+    https://github.com/BerriAI/litellm/issues/36418."""
+    monkeypatch.setenv("DATABASE_URL", "postgres://x:y@h:5432/db")
+    prisma_client._engine_confirmed_dead = False
+    prisma_client._engine_pid = 0
+    prisma_client.db.recreate_prisma_client = AsyncMock()
+    prisma_client._start_engine_watcher = AsyncMock()
+    prisma_client._cleanup_engine_watcher = MagicMock()
+
+    writer = MagicMock()
+    writer.query_raw = AsyncMock(return_value=[{"?column?": 1}])
+    monkeypatch.setattr(
+        PrismaClient,
+        "writer_db",
+        property(lambda self: writer),
+    )
+
+    await prisma_client._run_reconnect_cycle(timeout_seconds=5, force_recreate=True)
+    pinned = {
+        "recreate_called": prisma_client.db.recreate_prisma_client.await_count,
+        "writer_query_raw_calls": writer.query_raw.await_count,
+    }
+    assert pinned == {"recreate_called": 1, "writer_query_raw_calls": 1}
+
+
+@pytest.mark.asyncio
+async def test_attempt_db_reconnect_forwards_force_recreate_to_cycle(
+    prisma_client: PrismaClient,
+) -> None:
+    """Regression for https://github.com/BerriAI/litellm/issues/36418: the flag
+    has to survive both hops (attempt_db_reconnect -> inside-lock -> cycle),
+    otherwise the cached-plan caller silently gets a probe-gated reconnect."""
+    prisma_client._db_last_reconnect_attempt_ts = 0.0
+    prisma_client._run_reconnect_cycle = AsyncMock()
+
+    ok = await prisma_client.attempt_db_reconnect(reason="explicit", force_recreate=True)
+
+    assert ok is True
+    assert prisma_client._run_reconnect_cycle.await_args.kwargs.get("force_recreate") is True
+
+
+@pytest.mark.asyncio
 async def test_run_reconnect_cycle_passes_writer_generation_to_recreate(
     prisma_client: PrismaClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -3378,8 +3378,12 @@ class PrismaClient:
         `attempt_db_reconnect`, which is singleflight: when a schema change
         poisons every pooled connection at once, the first cached-plan error
         recreates the client and the concurrent waiters reuse that single
-        recreate instead of racing to kill each other's fresh engine. We then
-        retry the identical query exactly once.
+        recreate instead of racing to kill each other's fresh engine. We pass
+        `force_recreate` so the reconnect skips its `SELECT 1` liveness probe:
+        the connection is healthy here, it is the prepared statements on it
+        that are stale, so a passing probe would otherwise skip the recreate
+        and leave the retry to hit the same error. We then retry the identical
+        query exactly once.
 
         The retry reuses the original query byte-for-byte. Mutating the SQL
         (e.g. injecting a unique comment) would defeat PostgreSQL's plan cache,
@@ -3401,7 +3405,7 @@ class PrismaClient:
                 "query. This may occur during rolling deployments when schema "
                 "changes are applied."
             )
-            await self.attempt_db_reconnect(reason="postgres_cached_plan_error")
+            await self.attempt_db_reconnect(reason="postgres_cached_plan_error", force_recreate=True)
             return await self.db.query_first(sql_query, *args)
 
     @backoff.on_exception(
@@ -4691,7 +4695,11 @@ class PrismaClient:
         self._cleanup_engine_watcher()
         asyncio.create_task(self._start_engine_watcher())
 
-    async def _run_reconnect_cycle(self, timeout_seconds: float | None = None) -> None:
+    async def _run_reconnect_cycle(
+        self,
+        timeout_seconds: float | None = None,
+        force_recreate: bool = False,
+    ) -> None:
         """
         Run a reconnect cycle with a single overall timeout budget.
 
@@ -4702,6 +4710,11 @@ class PrismaClient:
         the client via the non-blocking kill-then-construct flow rather than
         calling disconnect(), which blocks the event loop on the synchronous
         subprocess.Popen.wait() inside prisma-client-py (see issue #26191).
+
+        `force_recreate` skips the direct path's liveness probe, for callers
+        whose failure lives in the session state rather than the connection
+        (stale prepared statements after a schema change): a reachable writer
+        proves nothing about those, so the probe must not veto the recreate.
         """
         effective_timeout: Final = (
             timeout_seconds if timeout_seconds is not None else self._db_watchdog_reconnect_timeout_seconds
@@ -4767,21 +4780,22 @@ class PrismaClient:
                 # detect a refresh that landed since cycle entry and skip the
                 # redundant restart.
                 writer: Final = self.writer_db
-                try:
-                    await writer.query_raw("SELECT 1")
-                    verbose_proxy_logger.info(
-                        "Writer healthy on probe; skipping recreate (engine "
-                        "likely already replaced by a token refresh)."
-                    )
-                    if isinstance(self.db, RoutingPrismaWrapper):
-                        self.db.mark_writer_recovered()
-                    await self._start_engine_watcher()
-                    return
-                except Exception as probe_err:
-                    verbose_proxy_logger.warning(
-                        "Writer probe failed (%s); recreating Prisma client.",
-                        probe_err,
-                    )
+                if force_recreate is False:
+                    try:
+                        await writer.query_raw("SELECT 1")
+                        verbose_proxy_logger.info(
+                            "Writer healthy on probe; skipping recreate (engine "
+                            "likely already replaced by a token refresh)."
+                        )
+                        if isinstance(self.db, RoutingPrismaWrapper):
+                            self.db.mark_writer_recovered()
+                        await self._start_engine_watcher()
+                        return
+                    except Exception as probe_err:
+                        verbose_proxy_logger.warning(
+                            "Writer probe failed (%s); recreating Prisma client.",
+                            probe_err,
+                        )
                 # Fresh Prisma client + new engine subprocess. The previous
                 # "lightweight" path called `disconnect()` which blocks the
                 # event loop on `subprocess.Popen.wait()`; since that call
@@ -4802,6 +4816,7 @@ class PrismaClient:
         force: bool,
         reason: str,
         timeout_seconds: float | None,
+        force_recreate: bool = False,
     ) -> bool:
         now: Final = time.time()
         if force is False and now - self._db_last_reconnect_attempt_ts < self._db_reconnect_cooldown_seconds:
@@ -4828,7 +4843,7 @@ class PrismaClient:
 
         reconnect_succeeded = False
         try:
-            await self._run_reconnect_cycle(timeout_seconds=timeout_seconds)
+            await self._run_reconnect_cycle(timeout_seconds=timeout_seconds, force_recreate=force_recreate)
             reconnect_succeeded = True
             self._consecutive_reconnect_failures = 0
             verbose_proxy_logger.info("Prisma DB reconnect succeeded. reason=%s", reason)
@@ -4851,9 +4866,13 @@ class PrismaClient:
         force: bool = False,
         timeout_seconds: float | None = None,
         lock_timeout_seconds: float | None = None,
+        force_recreate: bool = False,
     ) -> bool:
         """
         Attempt to reconnect the Prisma client in a singleflight manner.
+
+        `force` bypasses the cooldown; `force_recreate` bypasses the liveness
+        probe that would otherwise skip recreating a reachable engine.
 
         Returns:
             bool: True if reconnection succeeded, else False.
@@ -4868,7 +4887,7 @@ class PrismaClient:
 
         if lock_timeout_seconds is None:
             async with self._db_reconnect_lock:
-                return await self._attempt_reconnect_inside_lock(force, reason, timeout_seconds)
+                return await self._attempt_reconnect_inside_lock(force, reason, timeout_seconds, force_recreate)
 
         lock_acquired_by_timeout_task = False
 
@@ -4917,7 +4936,7 @@ class PrismaClient:
             return False
 
         try:
-            return await self._attempt_reconnect_inside_lock(force, reason, timeout_seconds)
+            return await self._attempt_reconnect_inside_lock(force, reason, timeout_seconds, force_recreate)
         finally:
             self._db_reconnect_lock.release()
 

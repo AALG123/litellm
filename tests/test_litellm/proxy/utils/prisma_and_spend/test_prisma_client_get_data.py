@@ -270,6 +270,9 @@ async def test_query_first_with_cached_plan_fallback_reconnects_then_retries_ide
     assert retry_call.args == first_call.args == (original_query, "abc")
     reconnect.assert_awaited_once()
     assert reconnect.await_args.kwargs.get("force", False) is False
+    # https://github.com/BerriAI/litellm/issues/36418: without this the healthy
+    # writer probe skips the recreate and the stale plans survive the retry
+    assert reconnect.await_args.kwargs.get("force_recreate") is True
     assert [name for name, *_ in manager.mock_calls] == [
         "query_first",
         "attempt_db_reconnect",
