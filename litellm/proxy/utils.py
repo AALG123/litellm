@@ -3389,11 +3389,13 @@ class PrismaClient:
         (e.g. injecting a unique comment) would defeat PostgreSQL's plan cache,
         forcing a fresh plan on every request and pegging the database CPU.
 
-        If the reconnect is skipped because a recent reconnect is still within
-        its cooldown, the retry runs against the same connection and may fail
-        again; the get_data backoff decorator re-runs the lookup and a later
-        attempt reconnects once the cooldown elapses.
+        The reconnect cooldown must not gate the engine this query itself saw
+        as stale, or a migration landing within the cooldown of an earlier
+        reconnect leaves auth failing until it elapses. The generation observed
+        before the query names that engine, so the reconnect bypasses the
+        cooldown only while it is still the live one.
         """
+        stale_engine_generation: Final = self.writer_db.engine_generation
         try:
             return await self.db.query_first(sql_query, *args)
         except Exception as e:
@@ -3405,7 +3407,11 @@ class PrismaClient:
                 "query. This may occur during rolling deployments when schema "
                 "changes are applied."
             )
-            await self.attempt_db_reconnect(reason="postgres_cached_plan_error", force_recreate=True)
+            await self.attempt_db_reconnect(
+                reason="postgres_cached_plan_error",
+                force_recreate=True,
+                stale_engine_generation=stale_engine_generation,
+            )
             return await self.db.query_first(sql_query, *args)
 
     @backoff.on_exception(
@@ -4811,15 +4817,35 @@ class PrismaClient:
 
             await asyncio.wait_for(_do_direct_reconnect(), timeout=effective_timeout)
 
+    def _cooldown_applies(self, stale_engine_generation: int | None) -> bool:
+        """
+        Whether the reconnect cooldown should still gate this caller.
+
+        The cooldown collapses a burst of callers onto one recreate, so it
+        keeps gating a caller whose named generation has already been replaced:
+        that recreate is the one it was waiting for. While the generation is
+        unchanged the damaged engine is still serving, so deferring to an
+        unrelated reconnect's cooldown would leave it broken until the cooldown
+        elapses.
+        """
+        if stale_engine_generation is None:
+            return True
+        return stale_engine_generation != self.writer_db.engine_generation
+
     async def _attempt_reconnect_inside_lock(
         self,
         force: bool,
         reason: str,
         timeout_seconds: float | None,
         force_recreate: bool = False,
+        stale_engine_generation: int | None = None,
     ) -> bool:
         now: Final = time.time()
-        if force is False and now - self._db_last_reconnect_attempt_ts < self._db_reconnect_cooldown_seconds:
+        if (
+            force is False
+            and self._cooldown_applies(stale_engine_generation)
+            and now - self._db_last_reconnect_attempt_ts < self._db_reconnect_cooldown_seconds
+        ):
             verbose_proxy_logger.debug(
                 "Skipping DB reconnect attempt inside lock due to cooldown. reason=%s",
                 reason,
@@ -4867,18 +4893,26 @@ class PrismaClient:
         timeout_seconds: float | None = None,
         lock_timeout_seconds: float | None = None,
         force_recreate: bool = False,
+        stale_engine_generation: int | None = None,
     ) -> bool:
         """
         Attempt to reconnect the Prisma client in a singleflight manner.
 
-        `force` bypasses the cooldown; `force_recreate` bypasses the liveness
-        probe that would otherwise skip recreating a reachable engine.
+        `force` bypasses the cooldown unconditionally; `force_recreate`
+        bypasses the liveness probe that would otherwise skip recreating a
+        reachable engine; `stale_engine_generation` bypasses the cooldown only
+        while the engine that produced the caller's failure is still the live
+        one (see `_cooldown_applies`).
 
         Returns:
             bool: True if reconnection succeeded, else False.
         """
         now: Final = time.time()
-        if force is False and now - self._db_last_reconnect_attempt_ts < self._db_reconnect_cooldown_seconds:
+        if (
+            force is False
+            and self._cooldown_applies(stale_engine_generation)
+            and now - self._db_last_reconnect_attempt_ts < self._db_reconnect_cooldown_seconds
+        ):
             verbose_proxy_logger.debug(
                 "Skipping DB reconnect attempt due to cooldown. reason=%s",
                 reason,
@@ -4887,7 +4921,9 @@ class PrismaClient:
 
         if lock_timeout_seconds is None:
             async with self._db_reconnect_lock:
-                return await self._attempt_reconnect_inside_lock(force, reason, timeout_seconds, force_recreate)
+                return await self._attempt_reconnect_inside_lock(
+                    force, reason, timeout_seconds, force_recreate, stale_engine_generation
+                )
 
         lock_acquired_by_timeout_task = False
 
@@ -4936,7 +4972,9 @@ class PrismaClient:
             return False
 
         try:
-            return await self._attempt_reconnect_inside_lock(force, reason, timeout_seconds, force_recreate)
+            return await self._attempt_reconnect_inside_lock(
+                force, reason, timeout_seconds, force_recreate, stale_engine_generation
+            )
         finally:
             self._db_reconnect_lock.release()
 

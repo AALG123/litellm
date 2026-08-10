@@ -12,6 +12,7 @@ Symbols pinned here:
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -631,3 +632,62 @@ async def test_run_reconnect_cycle_heavy_path_forwards_entry_generation_to_recre
 
     kwargs = prisma_client.db.recreate_prisma_client.await_args.kwargs
     assert kwargs.get("expected_generation") == 4
+
+
+@pytest.mark.asyncio
+async def test_attempt_db_reconnect_bypasses_cooldown_for_still_live_stale_engine(
+    prisma_client: PrismaClient,
+) -> None:
+    """A schema change landing inside the cooldown of an earlier reconnect used
+    to leave auth failing until the cooldown elapsed. While the engine the
+    caller's failure came from is still the live one, the cooldown must not
+    gate the recreate. Regression for
+    https://github.com/BerriAI/litellm/issues/36418."""
+    prisma_client.db.engine_generation = 7
+    prisma_client._db_last_reconnect_attempt_ts = time.time()
+    prisma_client._run_reconnect_cycle = AsyncMock()
+
+    ok = await prisma_client.attempt_db_reconnect(
+        reason="postgres_cached_plan_error",
+        force_recreate=True,
+        stale_engine_generation=7,
+    )
+
+    assert ok is True
+    assert prisma_client._run_reconnect_cycle.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_attempt_db_reconnect_honors_cooldown_once_stale_engine_replaced(
+    prisma_client: PrismaClient,
+) -> None:
+    """The bypass is scoped to the damaged engine: once a concurrent recreate
+    has replaced it, the cooldown must still collapse the rest of the burst
+    onto that recreate instead of killing the fresh engine."""
+    prisma_client.db.engine_generation = 8
+    prisma_client._db_last_reconnect_attempt_ts = time.time()
+    prisma_client._run_reconnect_cycle = AsyncMock()
+
+    ok = await prisma_client.attempt_db_reconnect(
+        reason="postgres_cached_plan_error",
+        force_recreate=True,
+        stale_engine_generation=7,
+    )
+
+    assert ok is False
+    prisma_client._run_reconnect_cycle.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_attempt_db_reconnect_keeps_cooldown_for_callers_without_generation(
+    prisma_client: PrismaClient,
+) -> None:
+    """Watchdog and transport-error callers name no generation, so they keep
+    the plain cooldown behaviour."""
+    prisma_client._db_last_reconnect_attempt_ts = time.time()
+    prisma_client._run_reconnect_cycle = AsyncMock()
+
+    ok = await prisma_client.attempt_db_reconnect(reason="watchdog_probe_failed")
+
+    assert ok is False
+    prisma_client._run_reconnect_cycle.assert_not_awaited()

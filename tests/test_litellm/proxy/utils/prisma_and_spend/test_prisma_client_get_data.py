@@ -567,3 +567,30 @@ async def test_get_data_team_keys_forward_limit_as_take(
         "where": {"team_id": "team-1"},
         "include": {"litellm_budget_table": True},
     }
+
+
+@pytest.mark.asyncio
+async def test_query_first_with_cached_plan_fallback_reports_pre_query_engine_generation(
+    prisma_client: PrismaClient,
+) -> None:
+    """The generation is snapshotted before the query, not after it fails: it
+    names the engine that prepared the stale statement, which is what lets the
+    reconnect bypass an unrelated cooldown while that engine is still live
+    (https://github.com/BerriAI/litellm/issues/36418). Reading it after the
+    failure would miss a recreate that landed in between and force a
+    needless second one."""
+    prisma_client.db.engine_generation = 3
+
+    async def _fail_then_bump(*args: Any, **kwargs: Any) -> dict[str, str]:
+        if prisma_client.db.engine_generation == 3:
+            prisma_client.db.engine_generation = 4
+            raise RuntimeError("cached plan must not change result type")
+        return {"token": "abc"}
+
+    prisma_client.db.query_first = AsyncMock(side_effect=_fail_then_bump)
+    prisma_client.attempt_db_reconnect = AsyncMock(return_value=True)
+
+    await prisma_client._query_first_with_cached_plan_fallback("SELECT 1")
+
+    kwargs = prisma_client.attempt_db_reconnect.await_args.kwargs
+    assert kwargs.get("stale_engine_generation") == 3
