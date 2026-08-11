@@ -8518,10 +8518,14 @@ class ProxyStartupEvent:
 
         ### RESET BUDGET ###
         if general_settings.get("disable_reset_budget", False) is False:
+            # Reuse the PodLockManager from db_spend_update_writer so only one pod
+            # sweeps per tick; every pod otherwise re-reads the whole due population
+            # against the same Postgres at the same calendar boundary
             budget_reset_job: Final = ResetBudgetJob(
                 proxy_logging_obj=proxy_logging_obj,
                 prisma_client=prisma_client,
                 reset_settings=get_budget_reset_settings(),
+                pod_lock_manager=proxy_logging_obj.db_spend_update_writer.pod_lock_manager,
             )
 
             scheduler.add_job(

@@ -712,6 +712,9 @@ async def test_initialize_scheduled_jobs_credentials(monkeypatch):
     mock_prisma_client = MagicMock()
     mock_proxy_logging = MagicMock(spec=ProxyLogging)
     mock_proxy_logging.slack_alerting_instance = MagicMock()
+    # spec=ProxyLogging carries no __init__-assigned attributes, and the scheduler
+    # reads the pod lock off the spend writer to elect one budget-reset sweeper
+    mock_proxy_logging.db_spend_update_writer = MagicMock()
     mock_proxy_config = AsyncMock()
 
     with (
@@ -773,6 +776,9 @@ async def test_periodic_reload_job_scheduled_without_store_model_in_db(monkeypat
     mock_prisma_client.db.litellm_config.find_first = AsyncMock(return_value=None)
     mock_proxy_logging = MagicMock(spec=ProxyLogging)
     mock_proxy_logging.slack_alerting_instance = MagicMock()
+    # spec=ProxyLogging carries no __init__-assigned attributes, and the scheduler
+    # reads the pod lock off the spend writer to elect one budget-reset sweeper
+    mock_proxy_logging.db_spend_update_writer = MagicMock()
     mock_proxy_config = AsyncMock()
     scheduler = AsyncIOScheduler()
 
@@ -813,6 +819,9 @@ async def test_initialize_scheduled_jobs_uses_configured_config_reload_interval(
     mock_prisma_client = MagicMock()
     mock_proxy_logging = MagicMock(spec=ProxyLogging)
     mock_proxy_logging.slack_alerting_instance = MagicMock()
+    # spec=ProxyLogging carries no __init__-assigned attributes, and the scheduler
+    # reads the pod lock off the spend writer to elect one budget-reset sweeper
+    mock_proxy_logging.db_spend_update_writer = MagicMock()
     mock_proxy_config = AsyncMock()
     mock_scheduler = MagicMock()
 
@@ -861,6 +870,9 @@ async def test_initialize_scheduled_jobs_rejects_non_positive_config_reload_inte
     mock_prisma_client = MagicMock()
     mock_proxy_logging = MagicMock(spec=ProxyLogging)
     mock_proxy_logging.slack_alerting_instance = MagicMock()
+    # spec=ProxyLogging carries no __init__-assigned attributes, and the scheduler
+    # reads the pod lock off the spend writer to elect one budget-reset sweeper
+    mock_proxy_logging.db_spend_update_writer = MagicMock()
     mock_proxy_config = AsyncMock()
     mock_scheduler = MagicMock()
 
@@ -907,6 +919,9 @@ async def test_initialize_scheduled_jobs_hydrates_mcp_when_store_model_in_db_fal
     mock_prisma_client = MagicMock()
     mock_proxy_logging = MagicMock(spec=ProxyLogging)
     mock_proxy_logging.slack_alerting_instance = MagicMock()
+    # spec=ProxyLogging carries no __init__-assigned attributes, and the scheduler
+    # reads the pod lock off the spend writer to elect one budget-reset sweeper
+    mock_proxy_logging.db_spend_update_writer = MagicMock()
     mock_proxy_config = AsyncMock()
 
     with (
@@ -7203,6 +7218,9 @@ async def test_store_model_in_db_db_override_when_config_false():
 
     mock_proxy_logging = MagicMock(spec=ProxyLogging)
     mock_proxy_logging.slack_alerting_instance = MagicMock()
+    # spec=ProxyLogging carries no __init__-assigned attributes, and the scheduler
+    # reads the pod lock off the spend writer to elect one budget-reset sweeper
+    mock_proxy_logging.db_spend_update_writer = MagicMock()
     mock_proxy_config = AsyncMock()
 
     with (
@@ -7245,6 +7263,9 @@ async def test_store_model_in_db_db_check_skipped_when_already_true(monkeypatch)
 
     mock_proxy_logging = MagicMock(spec=ProxyLogging)
     mock_proxy_logging.slack_alerting_instance = MagicMock()
+    # spec=ProxyLogging carries no __init__-assigned attributes, and the scheduler
+    # reads the pod lock off the spend writer to elect one budget-reset sweeper
+    mock_proxy_logging.db_spend_update_writer = MagicMock()
     mock_proxy_config = AsyncMock()
 
     with (
@@ -7289,6 +7310,9 @@ async def test_store_model_in_db_db_failure_graceful(monkeypatch):
 
     mock_proxy_logging = MagicMock(spec=ProxyLogging)
     mock_proxy_logging.slack_alerting_instance = MagicMock()
+    # spec=ProxyLogging carries no __init__-assigned attributes, and the scheduler
+    # reads the pod lock off the spend writer to elect one budget-reset sweeper
+    mock_proxy_logging.db_spend_update_writer = MagicMock()
     mock_proxy_config = AsyncMock()
 
     with (
@@ -11289,6 +11313,9 @@ async def _run_scheduled_background_jobs():
 
     mock_proxy_logging = MagicMock(spec=ProxyLogging)
     mock_proxy_logging.slack_alerting_instance = MagicMock()
+    # spec=ProxyLogging carries no __init__-assigned attributes, and the scheduler
+    # reads the pod lock off the spend writer to elect one budget-reset sweeper
+    mock_proxy_logging.db_spend_update_writer = MagicMock()
     mock_proxy_config = AsyncMock()
 
     with (
