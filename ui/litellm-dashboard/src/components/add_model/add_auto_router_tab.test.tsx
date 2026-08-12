@@ -600,6 +600,77 @@ describe("AddAutoRouterTab", () => {
     });
   });
 
+  // A pinned default model overrides the value router.py would derive from the tiers, and rides to
+  // the backend on the same auto_router_default_model field the derived value uses - so it has to
+  // clear the same availability check the tier models do.
+  describe("default model pin", () => {
+    const PINNED_MODEL = "pinned-default-model";
+
+    // Opens the dropdown once, then waits out the useQuery load: an open antd Select re-renders its
+    // already-mounted options in place as state changes, so polling only re-reads the DOM here.
+    const waitForPresetEnabled = async (label: string) => {
+      openTemplateDropdown();
+      await waitFor(() => {
+        expect(isOptionDisabled(optionByLabel(label)!)).toBe(false);
+      });
+    };
+
+    const applyPresetAndPin = async (user: ReturnType<typeof userEvent.setup>) => {
+      await waitForPresetEnabled("Anthropic Family");
+      fireEvent.click(optionByLabel("Anthropic Family")!);
+
+      // Applying a preset collapses Detailed Configuration, so the default model row is behind it.
+      expandDetailedConfiguration();
+      await user.click(screen.getByRole("combobox", { name: "Default model" }));
+      await user.click((await screen.findAllByTitle(PINNED_MODEL)).slice(-1)[0]);
+    };
+
+    beforeEach(() => {
+      mockFetchAvailableModels.mockResolvedValue([...ALL_FAMILY_MODELS, { model_group: PINNED_MODEL, mode: "chat" }]);
+    });
+
+    it("submits the pinned model in place of the one the tiers derive", async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<Harness />);
+
+      await applyPresetAndPin(user);
+      await user.type(screen.getByPlaceholderText(/smart_router/i), "pinned-router");
+      await user.click(screen.getByRole("button", { name: /add auto router/i }));
+
+      await waitFor(() => expect(handleAddAutoRouterSubmit).toHaveBeenCalled());
+      const submitted = vi.mocked(handleAddAutoRouterSubmit).mock.calls.at(-1)?.[0];
+      expect(submitted).toMatchObject({
+        auto_router_default_model: PINNED_MODEL,
+        complexity_router_config: { tiers: ANTHROPIC_TIERS },
+      });
+      // The pin belongs on litellm_params, not inside the stored config blob, where the deployment
+      // level value would overwrite it anyway.
+      expect(submitted?.complexity_router_config).not.toHaveProperty("default_model");
+      expect(PINNED_MODEL).not.toBe(ANTHROPIC_TIERS.MEDIUM[0]);
+    });
+
+    it("blocks a submit whose pinned model is no longer available", async () => {
+      const user = userEvent.setup();
+      const { container } = renderWithProviders(<Harness />);
+
+      await applyPresetAndPin(user);
+      fireEvent.change(screen.getByPlaceholderText(/smart_router/i), { target: { value: "stale-pin-router" } });
+      expect(screen.getByRole("button", { name: /add auto router/i })).toBeEnabled();
+
+      // Only the pinned model disappears - the tier models all survive, so nothing but the pin can
+      // be what blocks the submit.
+      testQueryClient.setQueryData(["availableModels", "autoRouter", "token"], ALL_FAMILY_MODELS);
+      await waitFor(() => expect(screen.getByRole("button", { name: /add auto router/i })).toBeDisabled());
+
+      fireEvent.submit(container.querySelector("form")!);
+
+      await waitFor(() =>
+        expect(NotificationManager.fromBackend).toHaveBeenCalledWith(expect.stringContaining(PINNED_MODEL)),
+      );
+      expect(handleAddAutoRouterSubmit).not.toHaveBeenCalled();
+    });
+  });
+
   describe("deployment-matched presets", () => {
     const renamedDeploymentsFor = (presetKey: string) =>
       [...getRequiredModelsInPreset(getPresetByKey(presetKey)!)].map((model, index) => ({

@@ -4,7 +4,7 @@ import { TextInput } from "@tremor/react";
 import { modelAvailableCall, modelPatchUpdateCall } from "../networking";
 import { fetchAvailableModels, ModelGroup } from "@/components/llm_calls/fetch_models";
 import RouterConfigBuilder from "../add_model/RouterConfigBuilder";
-import { normalizeTierModels } from "../add_model/complexity_router_tiers";
+import { normalizeTierModels, resolveComplexityDefaultModel } from "../add_model/complexity_router_tiers";
 import { isComplexityRouter } from "../add_model/auto_router_strategies";
 import {
   getKeywordTierRulesError,
@@ -19,6 +19,7 @@ import { DEFAULT_MATCH_THRESHOLD } from "../add_model/SemanticKeywordMatching";
 import { hydrateKeywordTierRules, serializeKeywordTierRules } from "../add_model/complexity_router_keywords";
 import ComplexityRouterConfig, {
   ComplexityRouterConfigValue,
+  ComplexityTiers,
   DEFAULT_ADAPTIVE_WEIGHTS,
   DEFAULT_SESSION_AFFINITY,
   DEFAULT_DEPLOYMENT_AFFINITY,
@@ -79,6 +80,20 @@ const toRecord = (value: unknown): Record<string, unknown> => {
   return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
     ? (parsed as Record<string, unknown>)
     : {};
+};
+
+/**
+ * Reads the stored complexity_router_default_model back as a pin, but only when it differs from
+ * what the tiers derive.
+ *
+ * Every router this UI has ever created stores the derived value verbatim, so hydrating those as
+ * pins would silently freeze the whole existing fleet's default at whatever it was the day someone
+ * opened this modal. A stored value the tiers do NOT produce can only have come from a deliberate
+ * choice (config.yaml, the API, or this row), and that is what must survive the save.
+ */
+export const hydratePinnedDefaultModel = (stored: unknown, tiers: ComplexityTiers): string | undefined => {
+  if (typeof stored !== "string" || !stored.trim()) return undefined;
+  return stored === resolveComplexityDefaultModel(tiers) ? undefined : stored;
 };
 
 export interface KeywordMatchingState {
@@ -236,13 +251,19 @@ const EditAutoRouterModal: React.FC<EditAutoRouterModalProps> = ({
           parsedConfig = JSON.parse(parsedConfig);
         }
 
+        const hydratedTiers = {
+          SIMPLE: normalizeTierModels(parsedConfig.tiers?.SIMPLE),
+          MEDIUM: normalizeTierModels(parsedConfig.tiers?.MEDIUM),
+          COMPLEX: normalizeTierModels(parsedConfig.tiers?.COMPLEX),
+          REASONING: normalizeTierModels(parsedConfig.tiers?.REASONING),
+        };
+
         const hydratedComplexityRouterConfig: ComplexityRouterConfigValue = {
-          tiers: {
-            SIMPLE: normalizeTierModels(parsedConfig.tiers?.SIMPLE),
-            MEDIUM: normalizeTierModels(parsedConfig.tiers?.MEDIUM),
-            COMPLEX: normalizeTierModels(parsedConfig.tiers?.COMPLEX),
-            REASONING: normalizeTierModels(parsedConfig.tiers?.REASONING),
-          },
+          tiers: hydratedTiers,
+          default_model: hydratePinnedDefaultModel(
+            modelData.litellm_params?.complexity_router_default_model,
+            hydratedTiers,
+          ),
           tier_labels: hydrateTierLabels(parsedConfig.tier_labels),
           classifier_type: parsedConfig.classifier_type || "heuristic",
           classifier_llm_config: parsedConfig.classifier_llm_config,
@@ -362,7 +383,7 @@ const EditAutoRouterModal: React.FC<EditAutoRouterModalProps> = ({
           return;
         }
 
-        const defaultModel = tiers.MEDIUM[0] || tiers.SIMPLE[0] || tiers.COMPLEX[0] || tiers.REASONING[0];
+        const defaultModel = resolveComplexityDefaultModel(tiers, complexityRouterConfig.default_model);
         const updatedLitellmParams = {
           ...modelData.litellm_params,
           complexity_router_config: buildUpdatedComplexityRouterConfig(

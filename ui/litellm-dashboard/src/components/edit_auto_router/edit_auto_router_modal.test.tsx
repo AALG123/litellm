@@ -548,3 +548,63 @@ describe("EditAutoRouterModal custom classifier prompt and fallback", () => {
     expect(savedConfig().classifier_llm_config).not.toHaveProperty("system_prompt");
   });
 });
+
+// Before the pin existed this modal re-derived complexity_router_default_model from the tiers on
+// every save, so a default set through config.yaml or the API was silently replaced the first time
+// anyone opened the modal for an unrelated edit.
+describe("EditAutoRouterModal default model", () => {
+  beforeEach(() => {
+    modelPatchUpdateCall.mockClear();
+  });
+
+  const savedDefaultModel = () => {
+    const [, payload] = modelPatchUpdateCall.mock.calls.at(-1) ?? [];
+    return payload?.litellm_params?.complexity_router_default_model;
+  };
+
+  const renderWithStoredDefault = (complexity_router_default_model: string) =>
+    renderWithProviders(
+      <EditAutoRouterModal
+        isVisible
+        onCancel={vi.fn()}
+        onSuccess={vi.fn()}
+        modelData={{
+          ...MODEL_DATA,
+          litellm_params: { ...MODEL_DATA.litellm_params, complexity_router_default_model },
+        }}
+        accessToken="token"
+        userRole="Admin"
+      />,
+    );
+
+  it("keeps a stored default the tiers would not produce through an untouched open-and-save", async () => {
+    const user = userEvent.setup();
+    renderWithStoredDefault("out-of-band-default");
+
+    await user.click(await screen.findByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => expect(modelPatchUpdateCall).toHaveBeenCalled());
+    expect(savedDefaultModel()).toBe("out-of-band-default");
+  });
+
+  it("shows that stored default as the pin, so the saved value is not a hidden one", async () => {
+    renderWithStoredDefault("out-of-band-default");
+
+    const select = await screen.findByRole("combobox", { name: "Default model" });
+    expect(within(select.closest(".ant-select") as HTMLElement).getByTitle("out-of-band-default")).toBeInTheDocument();
+  });
+
+  it("leaves a stored default that merely echoes the tiers free to track them again", async () => {
+    // The existing fleet stores the derived value verbatim. Hydrating those as pins would freeze
+    // every one of them the moment its tiers changed.
+    const user = userEvent.setup();
+    renderWithStoredDefault(STORED_CONFIG.tiers.MEDIUM[0]);
+
+    const select = await screen.findByRole("combobox", { name: "Default model" });
+    expect(select.closest(".ant-select")?.querySelector(".ant-select-selection-item")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: /save changes/i }));
+    await waitFor(() => expect(modelPatchUpdateCall).toHaveBeenCalled());
+    expect(savedDefaultModel()).toBe(STORED_CONFIG.tiers.MEDIUM[0]);
+  });
+});
