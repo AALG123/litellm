@@ -1,4 +1,8 @@
-import { useDeleteProxyConfigField, useProxyConfig } from "@/app/(dashboard)/hooks/proxyConfig/useProxyConfig";
+import {
+  DeleteProxyConfigFieldRequest,
+  useDeleteProxyConfigField,
+  useProxyConfig,
+} from "@/app/(dashboard)/hooks/proxyConfig/useProxyConfig";
 import { useStoreRequestInSpendLogs } from "@/app/(dashboard)/hooks/storeRequestInSpendLogs/useStoreRequestInSpendLogs";
 import NotificationsManager from "@/components/molecules/notifications_manager";
 import { parseErrorMessage } from "@/components/shared/errorUtils";
@@ -40,6 +44,9 @@ describe("LoggingSettings", () => {
   const mockDeleteField = vi.fn();
   const mockRefetch = vi.fn();
 
+  const clearedFieldNames = (): string[] =>
+    mockDeleteField.mock.calls.map((call) => (call[0] as DeleteProxyConfigFieldRequest).field_name);
+
   beforeEach(() => {
     vi.resetAllMocks();
     mockUseStoreRequestInSpendLogs.mockReturnValue({
@@ -68,6 +75,19 @@ describe("LoggingSettings", () => {
     expect(screen.getByRole("button", { name: "Save Settings" })).toBeInTheDocument();
   });
 
+  it("should render a control for every spend logs cleanup knob", () => {
+    renderWithProviders(<LoggingSettings />);
+
+    expect(screen.getByLabelText("Spend Logs Cleanup Batch Size (Optional)")).toBeInTheDocument();
+    expect(screen.getByLabelText("Spend Logs Cleanup Max Batches (Optional)")).toBeInTheDocument();
+    expect(screen.getByLabelText("Spend Logs Cleanup Run Budget (Optional)")).toBeInTheDocument();
+    expect(screen.getByLabelText("Spend Logs Cleanup Batch Timeout (Optional)")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("e.g., 1000")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("e.g., 500")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("e.g., 5m")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("e.g., 30s")).toBeInTheDocument();
+  });
+
   it("should toggle store prompts switch", async () => {
     const user = userEvent.setup();
     renderWithProviders(<LoggingSettings />);
@@ -94,6 +114,9 @@ describe("LoggingSettings", () => {
 
   it("should submit form with store prompts enabled and retention period", async () => {
     const user = userEvent.setup();
+    mockDeleteField.mockImplementation((_params, options) => {
+      options?.onSettled?.();
+    });
     mockMutate.mockImplementation((_params, options) => {
       options?.onSuccess?.();
     });
@@ -110,7 +133,6 @@ describe("LoggingSettings", () => {
     await user.click(saveButton);
 
     await waitFor(() => {
-      expect(mockDeleteField).not.toHaveBeenCalled();
       expect(mockMutate).toHaveBeenCalledWith(
         {
           store_prompts_in_spend_logs: true,
@@ -119,6 +141,94 @@ describe("LoggingSettings", () => {
         expect.any(Object),
       );
     });
+    expect(clearedFieldNames()).not.toContain("maximum_spend_logs_retention_period");
+  });
+
+  it("should submit every spend logs cleanup setting that has a value", async () => {
+    const user = userEvent.setup();
+    mockMutate.mockImplementation((_params, options) => {
+      options?.onSuccess?.();
+    });
+
+    renderWithProviders(<LoggingSettings />);
+
+    await user.click(screen.getByRole("switch"));
+    await user.type(screen.getByPlaceholderText("e.g., 7d, 30d"), "30d");
+    await user.type(screen.getByPlaceholderText("e.g., 1000"), "2000");
+    await user.type(screen.getByPlaceholderText("e.g., 500"), "50");
+    await user.type(screen.getByPlaceholderText("e.g., 5m"), "90s");
+    await user.type(screen.getByPlaceholderText("e.g., 30s"), "10s");
+
+    await user.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    const expectedParams = {
+      store_prompts_in_spend_logs: true,
+      maximum_spend_logs_retention_period: "30d",
+      maximum_spend_logs_cleanup_batch_size: 2000,
+      maximum_spend_logs_cleanup_max_batches: 50,
+      maximum_spend_logs_cleanup_run_budget: "90s",
+      maximum_spend_logs_cleanup_batch_timeout: "10s",
+    };
+
+    await waitFor(() => {
+      expect(mockMutate).toHaveBeenCalledWith(expectedParams, expect.any(Object));
+    });
+    expect(mockDeleteField).not.toHaveBeenCalled();
+  });
+
+  it("should omit blank cleanup settings from the save payload instead of sending empty values", async () => {
+    const user = userEvent.setup();
+    mockDeleteField.mockImplementation((_params, options) => {
+      options?.onSettled?.();
+    });
+    mockMutate.mockImplementation((_params, options) => {
+      options?.onSuccess?.();
+    });
+
+    renderWithProviders(<LoggingSettings />);
+
+    await user.type(screen.getByPlaceholderText("e.g., 1000"), "2000");
+    await user.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    await waitFor(() => {
+      expect(mockMutate).toHaveBeenCalled();
+    });
+
+    const submittedParams = mockMutate.mock.calls[0][0];
+    expect(submittedParams).not.toHaveProperty("maximum_spend_logs_retention_period");
+    expect(submittedParams).not.toHaveProperty("maximum_spend_logs_cleanup_max_batches");
+    expect(submittedParams).not.toHaveProperty("maximum_spend_logs_cleanup_run_budget");
+    expect(submittedParams).not.toHaveProperty("maximum_spend_logs_cleanup_batch_timeout");
+    expect(submittedParams).toEqual({
+      store_prompts_in_spend_logs: false,
+      maximum_spend_logs_cleanup_batch_size: 2000,
+    });
+  });
+
+  it("should clear the stored value of every cleanup setting left blank", async () => {
+    const user = userEvent.setup();
+    mockDeleteField.mockImplementation((_params, options) => {
+      options?.onSettled?.();
+    });
+    mockMutate.mockImplementation((_params, options) => {
+      options?.onSuccess?.();
+    });
+
+    renderWithProviders(<LoggingSettings />);
+
+    await user.type(screen.getByPlaceholderText("e.g., 5m"), "10m");
+    await user.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    await waitFor(() => {
+      expect(mockMutate).toHaveBeenCalled();
+    });
+
+    expect(clearedFieldNames().sort()).toEqual([
+      "maximum_spend_logs_cleanup_batch_size",
+      "maximum_spend_logs_cleanup_batch_timeout",
+      "maximum_spend_logs_cleanup_max_batches",
+      "maximum_spend_logs_retention_period",
+    ]);
   });
 
   it("should delete retention period field when left empty on submit", async () => {
@@ -234,6 +344,38 @@ describe("LoggingSettings", () => {
           stored_in_db: true,
           field_default_value: undefined,
         },
+        {
+          field_name: "maximum_spend_logs_cleanup_batch_size",
+          field_type: "Integer",
+          field_description: "Rows per delete",
+          field_value: 2000,
+          stored_in_db: true,
+          field_default_value: 1000,
+        },
+        {
+          field_name: "maximum_spend_logs_cleanup_max_batches",
+          field_type: "Integer",
+          field_description: "Deletes per table per run",
+          field_value: 50,
+          stored_in_db: true,
+          field_default_value: 500,
+        },
+        {
+          field_name: "maximum_spend_logs_cleanup_run_budget",
+          field_type: "string",
+          field_description: "Wall clock budget per run",
+          field_value: "90s",
+          stored_in_db: true,
+          field_default_value: "5m",
+        },
+        {
+          field_name: "maximum_spend_logs_cleanup_batch_timeout",
+          field_type: "string",
+          field_description: "Statement and lock timeout per batch",
+          field_value: "10s",
+          stored_in_db: true,
+          field_default_value: "30s",
+        },
       ],
       isLoading: false,
       refetch: mockRefetch,
@@ -246,6 +388,10 @@ describe("LoggingSettings", () => {
 
     expect(switchElement).toBeChecked();
     expect(retentionInput).toHaveValue("30d");
+    expect(screen.getByPlaceholderText("e.g., 1000")).toHaveDisplayValue("2000");
+    expect(screen.getByPlaceholderText("e.g., 500")).toHaveDisplayValue("50");
+    expect(screen.getByPlaceholderText("e.g., 5m")).toHaveValue("90s");
+    expect(screen.getByPlaceholderText("e.g., 30s")).toHaveValue("10s");
   });
 
   it("should reflect persisted values that arrive after the initial loading render", async () => {
