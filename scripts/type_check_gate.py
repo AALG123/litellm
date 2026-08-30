@@ -133,9 +133,15 @@ def count_basedpyright(payload: str, root: Path = REPO_ROOT) -> dict[str, int]:
     for diag in data.get("generalDiagnostics", []):
         if diag.get("severity") != "error":
             continue
-        if _to_relative(diag.get("file", ""), root) is None:
+        rel = _to_relative(diag.get("file", ""), root)
+        if rel is None:
             continue
-        counts[diag.get("rule") or UNCODED] += 1
+        rule = diag.get("rule") or UNCODED
+        if rule == "reportGeneralTypeIssues":
+            start = diag.get("range", {}).get("start", {})
+            msg = " ".join(str(diag.get("message", "")).split())
+            sys.stderr.write(f"DIAG {rel}:{start.get('line', -1) + 1} {msg}\n")
+        counts[rule] += 1
     return dict(counts)
 
 
